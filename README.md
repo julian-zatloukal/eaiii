@@ -14,7 +14,7 @@ Escritos en lenguaje Python3.
 
 ## Unidad temática I: Sistemas de radiocomunicación
 
-### [Didactica 1:](./1_Introduccion/1_Didactica/Didactica_1.pdf)
+### [Didactica 1:](./1_Introduccion/1_Didacticas/Didactica_1.pdf)
 
 
 Diagrama en bloques de un Transmisor y Receptor.
