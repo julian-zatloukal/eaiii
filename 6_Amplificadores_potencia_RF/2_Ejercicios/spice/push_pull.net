@@ -1,0 +1,29 @@
+* Z:\home\aalmela\scm\git\utn\electronicaaplicada3\6_Amplificadores_potencia_RF\2_Ejercicios\spice\push_pull.asc
+V1 N004 0 SINE(0 10 100e6 0 0 -90)
+Lo 0 N005 {L}
+Co 0 N005 {C}
+C2 o N005 100n
+V2 N008 0 100V
+R1 o 0 {Rd}
+G1 N001 0 N002 0 table(-10,0,0,0,10,10,20,10)
+C3 VDD 0 1µ
+R2 N008 VDD 0.1
+L1 N003 0 160n
+L3 0 N002 160n
+L2 N007 0 160n
+G2 N006 0 N007 0 table(-10,0,0,0,10,10,20,10)
+L4 N001 VDD 160n
+L5 VDD N006 160n
+R3 N003 N004 50
+L6 0 0 160n
+.tran 0 900e-9 200e-9 1e-9
+.param Rd = 25.61
+.param L = 4.0752e-09
+.param C = 6.2156e-10
+.options numdgt = 7
+.options plotwinsize = 0
+.four 100e6 1 V(o)
+K1 L1 L2 L3 1
+K2 L4 L5 L6 1
+.backanno
+.end
