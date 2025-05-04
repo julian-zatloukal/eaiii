@@ -1,58 +1,96 @@
-name: Build‑and‑merge‑notebooks‑PDF
-
+# .github/workflows/build-pdf.yml
+name: Build‑and‑merge notebooks to a single PDF
 on:
-  push:               # run on every push to any branch, any file
-  workflow_dispatch:  # allow manual trigger from the Actions tab
-
+  push:
+    branches: [main]        # ← no PR runs
+    paths-ignore:           # still run on *any* real file change
+      - '**.md'
+      - 'LICENSE'
+      - '.github/**'
 jobs:
-  pdf:
+  build:
     runs-on: ubuntu-latest
-
+    permissions: {contents: write}
+    env:
+      PYTHON_VERSION: '3.12'
+      CACHE_KEY: pip-${{ runner.os }}-${{ env.PYTHON_VERSION }}-v1
     steps:
-      - name: Check out repository
-        uses: actions/checkout@v4
+    - uses: actions/checkout@v4
 
-      - name: Set up Python 3.12
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
+    # ---------- toolchain ---------------------------------------------------
+    - uses: actions/setup-python@v5
+      with: {python-version: ${{ env.PYTHON_VERSION }}}
 
-      - name: Install build tools
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install "nbconvert[webpdf]==7.16.6" pypdf==5.4.0
-          # fetch the Chromium browser for nbconvert’s WebPDF exporter
-          playwright install chromium
+    - name: Restore pip cache
+      id: pip-cache
+      uses: actions/cache@v4
+      with:
+        path: ~/.cache/pip
+        key: ${{ env.CACHE_KEY }}
 
-      - name: Convert every notebook to PDF
-        run: |
-          mkdir -p build/pdfs
-          find . -type f -name '*.ipynb' -print0 |
-            while IFS= read -r -d '' nb; do
-              jupyter nbconvert "$nb" --to webpdf --output-dir build/pdfs
-            done
+    - name: Install build deps (nbconvert + pypdf + playwright‑pdf backend)
+      run: |
+        python -m pip install --upgrade pip
+        pip install "nbconvert[webpdf]==7.16.6" pypdf==5.4.0 parallel-bash
+        python -m playwright install --with-deps   # cache-able
 
-      - name: Merge PDFs into a single file
-        run: |
-          python <<'PY'
-          import pathlib
-          from pypdf import PdfWriter
+    # ---------- convert every .ipynb to individual PDFs ----------------------
+    - name: Collect notebooks list
+      id: nb
+      run: |
+        mapfile -t NB < <(git ls-files '*.ipynb' | sort)
+        printf '%s\n' "${NB[@]}" > notebook_list.txt
+        echo "count=${#NB[@]}" >>"$GITHUB_OUTPUT"
 
-          pdf_dir = pathlib.Path('build/pdfs')
-          writer = PdfWriter()
+    - name: Convert in parallel
+      run: |
+        cat notebook_list.txt | pb-parallel -j2 -- \
+          "jupyter nbconvert --to webpdf --embed-images --output-dir build/pdfs {}"
 
-          for pdf_path in sorted(pdf_dir.glob('*.pdf')):
-              writer.append(str(pdf_path))   # concatenate in alphabetical order
+    # ---------- merge with cover + TOC + bookmarks ---------------------------
+    - name: Merge PDFs to single file
+      run: |
+        python <<'PY'
+        import pathlib, datetime, json, sys
+        from pypdf import PdfReader, PdfWriter            # new API
+        root = pathlib.Path('build/pdfs')
+        files = sorted(root.glob('*.pdf'), key=lambda p: p.as_posix())
+        if not files: sys.exit("No PDFs produced!")
 
-          out_file = pathlib.Path('build/all_notebooks_combined.pdf')
-          out_file.parent.mkdir(parents=True, exist_ok=True)
-          with out_file.open('wb') as fh:
-              writer.write(fh)
-          print(f'Created {out_file}')
-          PY
+        w = PdfWriter()
+        # -- cover -----------------------------------------------------------
+        from reportlab.pdfgen import canvas
+        from reportlab.lib.pagesizes import A4
+        cover_path = root/'_cover.pdf'
+        c = canvas.Canvas(str(cover_path), pagesize=A4)
+        c.setFont("Helvetica-Bold", 26)
+        c.drawCentredString(A4[0]/2, A4[1]*0.7, "Electrónica Aplicada III")
+        c.setFont("Helvetica", 14)
+        c.drawCentredString(A4[0]/2, A4[1]*0.65,
+                            f"Compilación automática – {datetime.date.today()}")
+        c.showPage(); c.save()
+        files.insert(0, cover_path)
 
-      - name: Upload combined PDF
-        uses: actions/upload-artifact@v4
-        with:
-          name: notebooks-pdf
-          path: build/all_notebooks_combined.pdf
+        # -- merge + outline --------------------------------------------------
+        parents = {0: w.add_outline_item("Portada", 0)}
+        page_index = 0
+        for pdf_path in files:
+            r = PdfReader(str(pdf_path))
+            w.append(r)
+            title = pdf_path.stem.replace('_', ' ')
+            parts = pdf_path.parts
+            # first dir name as top‑level chapter
+            chap = parts[0]
+            lvl1 = parents.setdefault(chap, w.add_outline_item(chap, page_index))
+            w.add_outline_item(title, page_index, parent=lvl1)
+            page_index += len(r.pages)
+
+        out = pathlib.Path('EAIII_full.pdf')
+        with out.open('wb') as f: w.write(f)
+        PY
+
+    # ---------- upload -------------------------------------------------------
+    - uses: actions/upload-artifact@v4
+      with:
+        name: EAIII_full.pdf
+        path: EAIII_full.pdf
