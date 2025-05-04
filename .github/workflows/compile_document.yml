@@ -13,13 +13,21 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      - name: Cache pip
+        uses: actions/cache@v3
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
       - name: Set up Python
         uses: actions/setup-python@v5.6.0
         with:
           python-version: '3.x'
           cache: pip
 
-      - name: Install system dependencies
+      - name: Install system deps
         run: |
           sudo apt-get update
           sudo apt-get install -y \
@@ -30,7 +38,7 @@ jobs:
             texlive-latex-extra \
             wkhtmltopdf
 
-      - name: Install Python dependencies
+      - name: Install Python libs
         run: |
           pip install --upgrade pip
           pip install \
@@ -42,53 +50,71 @@ jobs:
             sphinx_copybutton \
             sphinx_gallery
 
-      - name: Convert notebooks to PDFs (with HTML fallback)
+      - name: Cache generated PDFs
+        uses: actions/cache@v3
+        with:
+          path: build
+          key: ${{ runner.os }}-notebooks-pdfs-${{ github.ref_name }}
+          restore-keys: |
+            ${{ runner.os }}-notebooks-pdfs-
+
+      - name: Convert notebooks to PDFs (parallel, skip checkpoints & up-to-date)
         run: |
           mkdir -p build
-          find . -type f -name '*.ipynb' | sort | while read -r nb; do
+          find . \
+            -type f \
+            -name '*.ipynb' \
+            ! -path '*/.ipynb_checkpoints/*' \
+            -print0 \
+          | sort -z \
+          | xargs -0 -n1 -P4 bash -c '
+            nb="$1"
             rel="${nb#./}"
             out="build/${rel%.ipynb}.pdf"
             dir="$(dirname "$out")"
             mkdir -p "$dir"
-            echo "🔄 Converting $nb → $out"
 
-            # 1) Try LaTeX → PDF (batchmode to suppress minor stops)
+            # skip if PDF is newer than notebook
+            if [[ -f "$out" && "$out" -nt "$nb" ]]; then
+              echo "⏭️  Up-to-date: $nb"
+              exit 0
+            fi
+
+            echo "🔄 Converting: $nb"
+            # 1) Try LaTeX → PDF
             if jupyter nbconvert "$nb" \
                  --to pdf \
                  --execute \
                  --ExecutePreprocessor.timeout=600 \
                  --PDFExporter.latex_command="['xelatex','-interaction=batchmode','%(filename)s']" \
                  --output-dir="$dir"; then
-              echo "✅ LaTeX PDF OK"
-              continue
+              echo "   ✅ LaTeX PDF succeeded"
+              exit 0
             fi
 
-            echo "⚠️  LaTeX PDF failed, trying HTML→PDF fallback"
-
-            # 2) Fallback: HTML → PDF via wkhtmltopdf
+            echo "   ⚠️  LaTeX failed, falling back to HTML→PDF"
+            # 2) Fallback: HTML → PDF
             if jupyter nbconvert "$nb" \
                  --to html \
                  --execute \
                  --ExecutePreprocessor.timeout=600 \
                  --output-dir="$dir"; then
-
-              html="${dir}/$(basename "${nb%.ipynb}.html")"
-              if wkhtmltopdf "$html" "$out"; then
-                echo "✅ HTML→PDF OK"
+              html="$dir/$(basename \"${nb%.ipynb}.html\")"
+              if wkhtmltopdf --enable-local-file-access --quiet "$html" "$out"; then
+                echo "   ✅ HTML→PDF succeeded"
               else
-                echo "❌ Fallback wkhtmltopdf failed for $nb — skipping"
+                echo "   ❌ wkhtmltopdf failed, skipping"
               fi
-
             else
-              echo "❌ HTML export failed for $nb — skipping"
+              echo "   ❌ HTML export failed, skipping"
             fi
-          done
+          ' _
 
       - name: Merge PDFs
         run: |
           mapfile -t pdfs < <(find build -type f -name '*.pdf' | sort)
           if [ "${#pdfs[@]}" -eq 0 ]; then
-            echo "No PDFs found, nothing to do."
+            echo "No PDFs to merge; exiting."
             exit 0
           fi
           echo "🔗 Merging ${#pdfs[@]} PDFs → all_notebooks.pdf"
