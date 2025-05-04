@@ -2,9 +2,6 @@ name: Build‑and‑merge‑notebooks‑PDF
 
 on:
   push:
-    branches: [ main ]
-    paths:
-      - '**/*.ipynb'
   workflow_dispatch:
 
 jobs:
@@ -24,15 +21,15 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           python -m pip install "nbconvert[webpdf]==7.16.6" pypdf==5.4.0
-          # download a recent Chromium for nbconvert's webpdf exporter
-          python -m pyppeteer install
+          playwright install chromium
 
       - name: Convert every notebook to PDF
         run: |
           mkdir -p build/pdfs
-          find . -type f -name '*.ipynb' -print0 | while IFS= read -r -d '' nb; do
-            jupyter nbconvert "$nb" --to webpdf --output-dir build/pdfs
-          done
+          find . -type f -name '*.ipynb' -print0 |
+            while IFS= read -r -d '' nb; do
+              jupyter nbconvert "$nb" --to webpdf --output-dir build/pdfs
+            done
 
       - name: Merge PDFs into a single file
         run: |
@@ -43,11 +40,11 @@ jobs:
           merger = PdfMerger()
           for pdf in sorted(pdf_dir.glob('*.pdf')):
               merger.append(pdf)
-          output = pathlib.Path('build/all_notebooks_combined.pdf')
-          output.parent.mkdir(parents=True, exist_ok=True)
-          merger.write(output)
+          out = pathlib.Path('build/all_notebooks_combined.pdf')
+          out.parent.mkdir(parents=True, exist_ok=True)
+          merger.write(out)
           merger.close()
-          print(f'Created {output}')
+          print(f'Created {out}')
           PY
 
       - name: Upload combined PDF
