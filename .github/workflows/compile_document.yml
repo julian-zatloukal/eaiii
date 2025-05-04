@@ -1,70 +1,93 @@
+# .github/workflows/compile_document.yml
 name: Compile course PDF
 
 on:
-  workflow_dispatch:          # run manually from the Actions tab
-  push:                       # run on each push
-  pull_request:               # …and on each PR
+  push:
+    branches: [ main ]
+  workflow_dispatch:
 
 jobs:
-  build-pdf:
+  compile:
     runs-on: ubuntu-latest
 
-    permissions:
-      contents: write          # let us attach the merged PDF to the repo / release
-
     steps:
-    - name: Checkout repo
-      uses: actions/checkout@v4
+    # -- checkout -------------------------------------------------------------
+    - uses: actions/checkout@v4
 
-    - name: Set up Python
-      uses: actions/setup-python@v5
+    # -- Python --------------------------------------------------------------
+    - uses: actions/setup-python@v5
       with:
-        python-version: '3.12'
-        cache: 'pip'
+        python-version: "3.12"
 
-    #––– system deps for LaTeX‑free webpdf + pypdf merge ––––––––––––––––––––
-    - name: Install OS packages
+    # -- OS packages (Chromium ‑ nbconvert relies on it) ---------------------
+    - name: System dependencies
       run: |
         sudo apt-get update
-        sudo apt-get install -y wget fonts-dejavu-core
+        sudo apt-get install -y chromium-browser
+        echo "PLAYWRIGHT_BROWSERS_PATH=0" >> $GITHUB_ENV   # keep cache local
 
-    #––– Python deps ––––––––––––––––––––––––––––––––––––––––––––––––––––––––
-    - name: Install Python requirements (and fix bad ones)
+    # -- Python libraries ----------------------------------------------------
+    - name: Install Python libs
       run: |
         python -m pip install --upgrade pip
-        # strip the non‑existent “parallel-bash” package if present
-        { grep -v '^parallel-bash' requirements.txt || true; } > /tmp/req.txt
-        pip install -r /tmp/req.txt
-        # exact versions that work together
         pip install nbconvert[webpdf]==7.16.6 pypdf==5.4.0
-        pip install playwright
 
-    #––– Playwright browsers for nbconvert’s webpdf exporter ––––––––––––––––
-    - name: Install Playwright chromium
-      run: |
-        playwright install --with-deps chromium   # headless shell for webpdf
-      #  ^­­­­– recommended by Playwright & nbconvert docs :contentReference[oaicite:0]{index=0}
+    # -- Playwright browser --------------------------------------------------
+    - name: Install Playwright Chromium
+      run: playwright install chromium
 
-    #––– Build every notebook to PDF (in directory‑order) ––––––––––––––––––
-    - name: Render notebooks → individual PDFs
+    # -- Convert every notebook to PDF (parallel) ----------------------------
+    - name: Build individual PDFs
       run: |
         mkdir -p build/pdfs
-        # find notebooks in natural directory order (e.g. 1_Introduccion first)
-        find . -type f -name '*.ipynb' | sort | while read nb; do
-          jupyter nbconvert "$nb" \
-            --to webpdf --allow-chromium-download \
-            --output-dir build/pdfs
-        done
-      #  “--allow‑chromium‑download” is a fallback if the cached binary ever vanishes :contentReference[oaicite:1]{index=1}
+        find . -name "*.ipynb" -print0 | \
+          xargs -0 -n1 -P "$(nproc)" -I{} \
+          jupyter-nbconvert --to webpdf --no-input --allow-chromium-download \
+                            "{}" --output-dir build/pdfs
 
-    #––– Merge, add cover & bookmarks ––––––––––––––––––––––––––––––––––––––
-    - name: Merge PDFs, create TOC & cover
+    # -- Merge PDFs + cover + bookmarks --------------------------------------
+    - name: Merge PDFs & write TOC
       run: |
-        python .github/scripts/merge_pdfs.py
+        python - <<'PY'
+        import os, re, sys
+        from pathlib import Path
+        from pypdf import PdfReader, PdfWriter
 
-    #––– Publish artefact ––––––––––––––––––––––––––––––––––––––––––––––––––
-    - name: Upload final PDF
-      uses: actions/upload-artifact@v4
+        pdf_root = Path("build/pdfs")
+        out_file = Path("build/compiled.pdf")
+        writer   = PdfWriter()
+
+        # optional cover -----------------------------------------------------
+        cover = Path("cover.pdf")
+        if cover.exists():
+            for p in PdfReader(str(cover)).pages:
+                writer.add_page(p)
+            writer.add_outline_item("Cover", 0)
+
+        # collect directories 01_, 02_, … in ascending order -----------------
+        dirs = sorted([d for d in Path(".").iterdir()
+                       if d.is_dir() and re.match(r'\d+_', d.name)],
+                      key=lambda d: int(d.name.split('_')[0]))
+
+        def pdfs_in(d):
+            return sorted((pdf_root/d.name).rglob("*.pdf"))
+
+        page_index = len(writer.pages)            # start after cover (if any)
+        for d in dirs:
+            for pdf in pdfs_in(d):
+                reader = PdfReader(str(pdf))
+                writer.append(reader)
+                # bookmark at the first page of each file
+                writer.add_outline_item(pdf.stem, page_index)
+                page_index += len(reader.pages)
+
+        out_file.parent.mkdir(parents=True, exist_ok=True)
+        with out_file.open("wb") as fh:
+            writer.write(fh)
+        PY
+
+    # -- Share artefact ------------------------------------------------------
+    - uses: actions/upload-artifact@v4
       with:
-        name: course-material
-        path: build/merged_document.pdf
+        name: compiled-pdf
+        path: build/compiled.pdf
