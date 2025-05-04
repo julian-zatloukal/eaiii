@@ -2,8 +2,7 @@ name: Compile Notebooks to PDF
 
 on:
   push:
-    branches:
-      - main
+    branches: [ main ]
   workflow_dispatch:
 
 jobs:
@@ -11,18 +10,15 @@ jobs:
     runs-on: ubuntu-24.04
 
     steps:
-      # 1) Checkout the repository
       - name: Checkout code
         uses: actions/checkout@v4
 
-      # 2) Install Python and cache pip
       - name: Set up Python
         uses: actions/setup-python@v5.6.0
         with:
           python-version: '3.x'
           cache: pip
 
-      # 3) Install system packages for PDF conversion
       - name: Install system dependencies
         run: |
           sudo apt-get update
@@ -31,9 +27,9 @@ jobs:
             pandoc \
             texlive-xetex \
             texlive-fonts-recommended \
-            texlive-latex-extra
+            texlive-latex-extra \
+            wkhtmltopdf
 
-      # 4) Install Python libraries
       - name: Install Python dependencies
         run: |
           pip install --upgrade pip
@@ -46,32 +42,61 @@ jobs:
             sphinx_copybutton \
             sphinx_gallery
 
-      # 5) Convert all .ipynb to PDF
-      - name: Convert notebooks to PDFs
+      - name: Convert notebooks to PDFs (with HTML fallback)
         run: |
           mkdir -p build
-          find . -type f -name '*.ipynb' | sort | \
-          while read -r nb; do
-            out="build/${nb#./}"
-            out="${out%.ipynb}.pdf"
-            mkdir -p "$(dirname "$out")"
-            echo "Converting $nb → $out"
-            jupyter nbconvert "$nb" \
-              --to pdf \
-              --execute \
-              --ExecutePreprocessor.timeout=600 \
-              --output-dir="$(dirname "$out")"
+          find . -type f -name '*.ipynb' | sort | while read -r nb; do
+            rel="${nb#./}"
+            out="build/${rel%.ipynb}.pdf"
+            dir="$(dirname "$out")"
+            mkdir -p "$dir"
+            echo "🔄 Converting $nb → $out"
+
+            # 1) Try LaTeX → PDF (batchmode to suppress minor stops)
+            if jupyter nbconvert "$nb" \
+                 --to pdf \
+                 --execute \
+                 --ExecutePreprocessor.timeout=600 \
+                 --PDFExporter.latex_command="['xelatex','-interaction=batchmode','%(filename)s']" \
+                 --output-dir="$dir"; then
+              echo "✅ LaTeX PDF OK"
+              continue
+            fi
+
+            echo "⚠️  LaTeX PDF failed, trying HTML→PDF fallback"
+
+            # 2) Fallback: HTML → PDF via wkhtmltopdf
+            if jupyter nbconvert "$nb" \
+                 --to html \
+                 --execute \
+                 --ExecutePreprocessor.timeout=600 \
+                 --output-dir="$dir"; then
+
+              html="${dir}/$(basename "${nb%.ipynb}.html")"
+              if wkhtmltopdf "$html" "$out"; then
+                echo "✅ HTML→PDF OK"
+              else
+                echo "❌ Fallback wkhtmltopdf failed for $nb — skipping"
+              fi
+
+            else
+              echo "❌ HTML export failed for $nb — skipping"
+            fi
           done
 
-      # 6) Merge PDFs into single file
       - name: Merge PDFs
         run: |
-          find build -type f -name '*.pdf' | sort \
-            | xargs gs -dBATCH -dNOPAUSE -q \
-                -sDEVICE=pdfwrite \
-                -sOutputFile=all_notebooks.pdf
+          mapfile -t pdfs < <(find build -type f -name '*.pdf' | sort)
+          if [ "${#pdfs[@]}" -eq 0 ]; then
+            echo "No PDFs found, nothing to do."
+            exit 0
+          fi
+          echo "🔗 Merging ${#pdfs[@]} PDFs → all_notebooks.pdf"
+          gs -dBATCH -dNOPAUSE -q \
+             -sDEVICE=pdfwrite \
+             -sOutputFile=all_notebooks.pdf \
+             "${pdfs[@]}"
 
-      # 7) Upload the final PDF artifact
       - name: Upload merged PDF
         uses: actions/upload-artifact@v4
         with:
