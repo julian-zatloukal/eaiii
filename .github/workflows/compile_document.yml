@@ -1,27 +1,26 @@
-# .github/workflows/build-pdf.yml  – syntax‑checked
-name: Build PDF
+# .github/workflows/compile_document.yml
+name: Build PDF
 
 on:
   push:
-    branches: [ "main" ]          # no PR runs
-    # still run on *any* content change but ignore repo‑meta files
+    branches: [ "main" ]          # run on every push to main
     paths-ignore:
       - '**.md'
       - 'LICENSE'
+      - '.github/**'
 
 jobs:
   build:
     runs-on: ubuntu-latest
     permissions: { contents: write }
 
-    env:
+    env:                           # only static / self‑contained env here
       PYTHON_VERSION: "3.12"
-      CACHE_KEY: "pip-${{ runner.os }}-${{ env.PYTHON_VERSION }}-v1"
 
     steps:
     - uses: actions/checkout@v4
 
-    # ---------- toolchain ---------------------------------------------------
+    # ------------------------------------------------- toolchain ----------
     - uses: actions/setup-python@v5
       with:
         python-version: "${{ env.PYTHON_VERSION }}"
@@ -31,15 +30,15 @@ jobs:
       uses: actions/cache@v4
       with:
         path: ~/.cache/pip
-        key: "${{ env.CACHE_KEY }}"
+        key: "pip-${{ runner.os }}-${{ env.PYTHON_VERSION }}-v1"
 
     - name: Install build deps
       run: |
         python -m pip install --upgrade pip
         pip install "nbconvert[webpdf]==7.16.6" pypdf==5.4.0 parallel-bash
-        python -m playwright install --with-deps   # cached
+        python -m playwright install --with-deps    # cached by previous step
 
-    # ---------- convert notebooks -------------------------------------------
+    # ---------------------------------------------- convert notebooks -----
     - name: Collect notebooks
       id: nb
       run: |
@@ -52,7 +51,7 @@ jobs:
         cat notebook_list.txt | pb-parallel -j2 -- \
           "jupyter nbconvert --to webpdf --embed-images --output-dir build/pdfs {}"
 
-    # ---------- merge PDFs ---------------------------------------------------
+    # ------------------------------------------------ merge PDFs ----------
     - name: Merge
       run: |
         python <<'PY'
@@ -64,8 +63,9 @@ jobs:
         root = pathlib.Path('build/pdfs')
         pdfs = sorted(root.glob('*.pdf'))
         if not pdfs:
-            sys.exit("No PDFs!")
+            sys.exit("No PDFs generated!")
 
+        # --- cover page ---------------------------------------------------
         cover = root/'_cover.pdf'
         c = canvas.Canvas(str(cover), pagesize=A4)
         c.setFont("Helvetica-Bold", 26)
@@ -77,23 +77,22 @@ jobs:
         pdfs.insert(0, cover)
 
         writer = PdfWriter()
-        outline_root = writer.add_outline_item("Portada", 0)
         page_no = 0
+        chapter_nodes = {}
+
         for p in pdfs:
             reader = PdfReader(str(p))
             writer.append(reader)
             title = p.stem.replace('_', ' ')
             chapter = p.parts[0]
-            # one top‑level item per first‑level directory
-            if not any(o.title == chapter for o in writer.outline):
-                chapter_node = writer.add_outline_item(chapter, page_no)
-            else:
-                chapter_node = next(o for o in writer.outline if o.title == chapter)
-            writer.add_outline_item(title, page_no, parent=chapter_node)
+            if chapter not in chapter_nodes:
+                chapter_nodes[chapter] = writer.add_outline_item(chapter, page_no)
+            writer.add_outline_item(title, page_no, parent=chapter_nodes[chapter])
             page_no += len(reader.pages)
 
         out = pathlib.Path('EAIII_full.pdf')
-        with out.open('wb') as f: writer.write(f)
+        with out.open('wb') as f:
+            writer.write(f)
         PY
 
     - uses: actions/upload-artifact@v4
