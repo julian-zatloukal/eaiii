@@ -1,57 +1,70 @@
-name: compile-document
+name: Compile course PDF
 
 on:
-  push:           # run on every push to default branch
-  workflow_dispatch:  # allow manual trigger from the UI
+  workflow_dispatch:          # run manually from the Actions tab
+  push:                       # run on each push
+  pull_request:               # …and on each PR
 
 jobs:
-  build:
-    strategy:
-      matrix:
-        os: [ubuntu-latest]   # add windows-latest or macos-latest if needed
-    runs-on: ${{ matrix.os }}
+  build-pdf:
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: write          # let us attach the merged PDF to the repo / release
 
     steps:
-      - name: Checkout repo
-        uses: actions/checkout@v4
+    - name: Checkout repo
+      uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.12'
+        cache: 'pip'
 
-      # ---------- cache -------------
-      - name: Restore pip cache
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/pip
-          key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
+    #––– system deps for LaTeX‑free webpdf + pypdf merge ––––––––––––––––––––
+    - name: Install OS packages
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y wget fonts-dejavu-core
 
-      # ---------- dependencies -------
-      - name: Upgrade pip + build deps
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install nbconvert[webpdf]==7.16.6 pypdf==5.4.0
+    #––– Python deps ––––––––––––––––––––––––––––––––––––––––––––––––––––––––
+    - name: Install Python requirements (and fix bad ones)
+      run: |
+        python -m pip install --upgrade pip
+        # strip the non‑existent “parallel-bash” package if present
+        { grep -v '^parallel-bash' requirements.txt || true; } > /tmp/req.txt
+        pip install -r /tmp/req.txt
+        # exact versions that work together
+        pip install nbconvert[webpdf]==7.16.6 pypdf==5.4.0
+        pip install playwright
 
-      # ---------- convert notebooks ---
-      - name: Convert all notebooks to individual PDFs (webpdf template)
-        shell: bash
-        run: |
-          mkdir -p build/pdfs
-          find . -name "*.ipynb" -not -path "*/.ipynb_checkpoints/*" \
-            | sort \
-            | while read nb; do
-                jupyter nbconvert "$nb" --to webpdf --template lab --output-dir build/pdfs
-              done
+    #––– Playwright browsers for nbconvert’s webpdf exporter ––––––––––––––––
+    - name: Install Playwright chromium
+      run: |
+        playwright install --with-deps chromium   # headless shell for webpdf
+      #  ^­­­­– recommended by Playwright & nbconvert docs :contentReference[oaicite:0]{index=0}
 
-      # ---------- merge ---------------
-      - name: Merge PDFs respecting folder order
-        run: |
-          python scripts/merge_pdfs.py   # your existing Python that now uses PdfWriter
+    #––– Build every notebook to PDF (in directory‑order) ––––––––––––––––––
+    - name: Render notebooks → individual PDFs
+      run: |
+        mkdir -p build/pdfs
+        # find notebooks in natural directory order (e.g. 1_Introduccion first)
+        find . -type f -name '*.ipynb' | sort | while read nb; do
+          jupyter nbconvert "$nb" \
+            --to webpdf --allow-chromium-download \
+            --output-dir build/pdfs
+        done
+      #  “--allow‑chromium‑download” is a fallback if the cached binary ever vanishes :contentReference[oaicite:1]{index=1}
 
-      # ---------- upload --------------
-      - name: Upload final document
-        uses: actions/upload-artifact@v4
-        with:
-          name: course-PDF
-          path: build/merged_document.pdf
+    #––– Merge, add cover & bookmarks ––––––––––––––––––––––––––––––––––––––
+    - name: Merge PDFs, create TOC & cover
+      run: |
+        python .github/scripts/merge_pdfs.py
+
+    #––– Publish artefact ––––––––––––––––––––––––––––––––––––––––––––––––––
+    - name: Upload final PDF
+      uses: actions/upload-artifact@v4
+      with:
+        name: course-material
+        path: build/merged_document.pdf
