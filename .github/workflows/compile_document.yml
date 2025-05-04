@@ -1,26 +1,22 @@
-# .github/workflows/compile_document.yml
 name: Build PDF
 
 on:
   push:
     branches: [ "main" ]          # run on every push to main
-    paths-ignore:
-      - '**.md'
-      - 'LICENSE'
-      - '.github/**'
+  workflow_dispatch:               # allow manual dispatch from the UI
 
 jobs:
   build:
     runs-on: ubuntu-latest
     permissions: { contents: write }
 
-    env:                           # only static / self‑contained env here
+    env:
       PYTHON_VERSION: "3.12"
 
     steps:
     - uses: actions/checkout@v4
 
-    # ------------------------------------------------- toolchain ----------
+    # -------- toolchain ---------------------------------------------------
     - uses: actions/setup-python@v5
       with:
         python-version: "${{ env.PYTHON_VERSION }}"
@@ -36,9 +32,9 @@ jobs:
       run: |
         python -m pip install --upgrade pip
         pip install "nbconvert[webpdf]==7.16.6" pypdf==5.4.0 parallel-bash
-        python -m playwright install --with-deps    # cached by previous step
+        python -m playwright install --with-deps
 
-    # ---------------------------------------------- convert notebooks -----
+    # -------- convert notebooks ------------------------------------------
     - name: Collect notebooks
       id: nb
       run: |
@@ -51,7 +47,7 @@ jobs:
         cat notebook_list.txt | pb-parallel -j2 -- \
           "jupyter nbconvert --to webpdf --embed-images --output-dir build/pdfs {}"
 
-    # ------------------------------------------------ merge PDFs ----------
+    # -------- merge PDFs --------------------------------------------------
     - name: Merge
       run: |
         python <<'PY'
@@ -65,7 +61,7 @@ jobs:
         if not pdfs:
             sys.exit("No PDFs generated!")
 
-        # --- cover page ---------------------------------------------------
+        # cover page -------------------------------------------------------
         cover = root/'_cover.pdf'
         c = canvas.Canvas(str(cover), pagesize=A4)
         c.setFont("Helvetica-Bold", 26)
