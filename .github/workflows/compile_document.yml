@@ -1,130 +1,57 @@
-name: Compile Notebooks to PDF
+name: Build‑and‑merge‑notebooks‑PDF
 
 on:
   push:
     branches: [ main ]
+    paths:
+      - '**/*.ipynb'
   workflow_dispatch:
 
 jobs:
-  compile:
-    runs-on: ubuntu-24.04
+  pdf:
+    runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout code
+      - name: Check out repository
         uses: actions/checkout@v4
 
-      - name: Cache pip
-        uses: actions/cache@v3
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
         with:
-          path: ~/.cache/pip
-          key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
-          restore-keys: |
-            ${{ runner.os }}-pip-
+          python-version: '3.12'
 
-      - name: Set up Python
-        uses: actions/setup-python@v5.6.0
-        with:
-          python-version: '3.x'
-          cache: pip
-
-      - name: Install system deps
+      - name: Install build tools
         run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            ghostscript \
-            pandoc \
-            texlive-xetex \
-            texlive-fonts-recommended \
-            texlive-latex-extra \
-            wkhtmltopdf
+          python -m pip install --upgrade pip
+          python -m pip install "nbconvert[webpdf]==7.16.6" pypdf==5.4.0
+          # download a recent Chromium for nbconvert's webpdf exporter
+          python -m pyppeteer install
 
-      - name: Install Python libs
+      - name: Convert every notebook to PDF
         run: |
-          pip install --upgrade pip
-          pip install \
-            jupyter \
-            matplotlib \
-            scipy \
-            scikit-rf \
-            nbsphinx \
-            sphinx_copybutton \
-            sphinx_gallery
+          mkdir -p build/pdfs
+          find . -type f -name '*.ipynb' -print0 | while IFS= read -r -d '' nb; do
+            jupyter nbconvert "$nb" --to webpdf --output-dir build/pdfs
+          done
 
-      - name: Cache generated PDFs
-        uses: actions/cache@v3
-        with:
-          path: build
-          key: ${{ runner.os }}-notebooks-pdfs-${{ github.ref_name }}
-          restore-keys: |
-            ${{ runner.os }}-notebooks-pdfs-
-
-      - name: Convert notebooks to PDFs (parallel, skip checkpoints & up-to-date)
+      - name: Merge PDFs into a single file
         run: |
-          mkdir -p build
-          find . \
-            -type f \
-            -name '*.ipynb' \
-            ! -path '*/.ipynb_checkpoints/*' \
-            -print0 \
-          | sort -z \
-          | xargs -0 -n1 -P4 bash -c '
-            nb="$1"
-            rel="${nb#./}"
-            out="build/${rel%.ipynb}.pdf"
-            dir="$(dirname "$out")"
-            mkdir -p "$dir"
+          python <<'PY'
+          import pathlib
+          from pypdf import PdfMerger
+          pdf_dir = pathlib.Path('build/pdfs')
+          merger = PdfMerger()
+          for pdf in sorted(pdf_dir.glob('*.pdf')):
+              merger.append(pdf)
+          output = pathlib.Path('build/all_notebooks_combined.pdf')
+          output.parent.mkdir(parents=True, exist_ok=True)
+          merger.write(output)
+          merger.close()
+          print(f'Created {output}')
+          PY
 
-            # skip if PDF is newer than notebook
-            if [[ -f "$out" && "$out" -nt "$nb" ]]; then
-              echo "⏭️  Up-to-date: $nb"
-              exit 0
-            fi
-
-            echo "🔄 Converting: $nb"
-            # 1) Try LaTeX → PDF
-            if jupyter nbconvert "$nb" \
-                 --to pdf \
-                 --execute \
-                 --ExecutePreprocessor.timeout=600 \
-                 --PDFExporter.latex_command="['xelatex','-interaction=batchmode','%(filename)s']" \
-                 --output-dir="$dir"; then
-              echo "   ✅ LaTeX PDF succeeded"
-              exit 0
-            fi
-
-            echo "   ⚠️  LaTeX failed, falling back to HTML→PDF"
-            # 2) Fallback: HTML → PDF
-            if jupyter nbconvert "$nb" \
-                 --to html \
-                 --execute \
-                 --ExecutePreprocessor.timeout=600 \
-                 --output-dir="$dir"; then
-              html="$dir/$(basename \"${nb%.ipynb}.html\")"
-              if wkhtmltopdf --enable-local-file-access --quiet "$html" "$out"; then
-                echo "   ✅ HTML→PDF succeeded"
-              else
-                echo "   ❌ wkhtmltopdf failed, skipping"
-              fi
-            else
-              echo "   ❌ HTML export failed, skipping"
-            fi
-          ' _
-
-      - name: Merge PDFs
-        run: |
-          mapfile -t pdfs < <(find build -type f -name '*.pdf' | sort)
-          if [ "${#pdfs[@]}" -eq 0 ]; then
-            echo "No PDFs to merge; exiting."
-            exit 0
-          fi
-          echo "🔗 Merging ${#pdfs[@]} PDFs → all_notebooks.pdf"
-          gs -dBATCH -dNOPAUSE -q \
-             -sDEVICE=pdfwrite \
-             -sOutputFile=all_notebooks.pdf \
-             "${pdfs[@]}"
-
-      - name: Upload merged PDF
+      - name: Upload combined PDF
         uses: actions/upload-artifact@v4
         with:
-          name: all-notebooks-pdf
-          path: all_notebooks.pdf
+          name: notebooks-pdf
+          path: build/all_notebooks_combined.pdf
