@@ -1,0 +1,72 @@
+name: Compile Notebooks to PDF
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.x'
+          cache: 'pip'
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            ghostscript \
+            pandoc \
+            texlive-xetex \
+            texlive-fonts-recommended \
+            texlive-latex-extra
+
+      - name: Install Python dependencies
+        run: |
+          pip install --upgrade pip
+          pip install \
+            jupyter \
+            matplotlib \
+            scipy \
+            scikit-rf \
+            nbsphinx \
+            sphinx_copybutton \
+            sphinx_gallery
+
+      - name: Convert all notebooks to PDFs
+        run: |
+          mkdir -p build
+          find . -type f -name '*.ipynb' | sort | while read -r nb; do
+            out="build/${nb#./}"
+            out="${out%.ipynb}.pdf"
+            mkdir -p "$(dirname "$out")"
+            echo "Converting $nb → $out"
+            jupyter nbconvert "$nb" \
+              --to pdf \
+              --execute \
+              --ExecutePreprocessor.timeout=600 \
+              --output "${out##*/}" \
+              --output-dir="$(dirname "$out")"
+          done
+
+      - name: Merge all PDFs
+        run: |
+          PDFs=$(find build -type f -name '*.pdf' | sort)
+          echo "Merging PDFs..."
+          gs -dBATCH -dNOPAUSE -q -sDEVICE=pdfwrite \
+             -sOutputFile=all_notebooks.pdf $PDFs
+
+      - name: Upload merged PDF
+        uses: actions/upload-artifact@v3
+        with:
+          name: all-notebooks-pdf
+          path: all_notebooks.pdf
