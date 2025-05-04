@@ -7,19 +7,22 @@ on:
   workflow_dispatch:
 
 jobs:
-  build:
-    runs-on: ubuntu-latest
+  compile:
+    runs-on: ubuntu-24.04
 
     steps:
-      - name: Check out repo
-        uses: actions/checkout@v3
+      # 1) Checkout the repository
+      - name: Checkout code
+        uses: actions/checkout@v4
 
+      # 2) Install Python and cache pip
       - name: Set up Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5.6.0
         with:
           python-version: '3.x'
-          cache: 'pip'
+          cache: pip
 
+      # 3) Install system packages for PDF conversion
       - name: Install system dependencies
         run: |
           sudo apt-get update
@@ -30,6 +33,7 @@ jobs:
             texlive-fonts-recommended \
             texlive-latex-extra
 
+      # 4) Install Python libraries
       - name: Install Python dependencies
         run: |
           pip install --upgrade pip
@@ -42,10 +46,12 @@ jobs:
             sphinx_copybutton \
             sphinx_gallery
 
-      - name: Convert all notebooks to PDFs
+      # 5) Convert all .ipynb to PDF
+      - name: Convert notebooks to PDFs
         run: |
           mkdir -p build
-          find . -type f -name '*.ipynb' | sort | while read -r nb; do
+          find . -type f -name '*.ipynb' | sort | \
+          while read -r nb; do
             out="build/${nb#./}"
             out="${out%.ipynb}.pdf"
             mkdir -p "$(dirname "$out")"
@@ -54,19 +60,20 @@ jobs:
               --to pdf \
               --execute \
               --ExecutePreprocessor.timeout=600 \
-              --output "${out##*/}" \
               --output-dir="$(dirname "$out")"
           done
 
-      - name: Merge all PDFs
+      # 6) Merge PDFs into single file
+      - name: Merge PDFs
         run: |
-          PDFs=$(find build -type f -name '*.pdf' | sort)
-          echo "Merging PDFs..."
-          gs -dBATCH -dNOPAUSE -q -sDEVICE=pdfwrite \
-             -sOutputFile=all_notebooks.pdf $PDFs
+          find build -type f -name '*.pdf' | sort \
+            | xargs gs -dBATCH -dNOPAUSE -q \
+                -sDEVICE=pdfwrite \
+                -sOutputFile=all_notebooks.pdf
 
+      # 7) Upload the final PDF artifact
       - name: Upload merged PDF
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: all-notebooks-pdf
           path: all_notebooks.pdf
